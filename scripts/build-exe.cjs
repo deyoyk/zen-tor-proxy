@@ -9,6 +9,7 @@ const distDir = path.join(repoRoot, 'dist');
 const rawOs = process.argv[2] ?? process.platform;
 const arch = process.argv[3] ?? process.arch;
 const nodeBin = path.resolve(process.argv[4] ?? process.execPath);
+const reuseBlob = process.argv[5] === 'reuse';
 
 const os = { win32: 'windows', windows: 'windows', darwin: 'macos', macos: 'macos', linux: 'linux' }[rawOs];
 if (!os) {
@@ -64,7 +65,15 @@ function zeroCertificateTable(file) {
 fs.mkdirSync(distDir, { recursive: true });
 console.log(`\nBuilding ${outName} (os=${os}, arch=${arch}, node=${nodeBin})`);
 
-run(nodeBin, ['--experimental-sea-config', path.join(repoRoot, 'sea-config.json')], { cwd: repoRoot });
+if (reuseBlob) {
+  if (!fs.existsSync(blobPath)) {
+    console.error(`reuse mode: SEA blob not found at ${blobPath}`);
+    process.exit(1);
+  }
+  console.log(`Reusing existing SEA blob: ${blobPath}`);
+} else {
+  run(nodeBin, ['--experimental-sea-config', path.join(repoRoot, 'sea-config.json')], { cwd: repoRoot });
+}
 
 fs.copyFileSync(nodeBin, outPath);
 

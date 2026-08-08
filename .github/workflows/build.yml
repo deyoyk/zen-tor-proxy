@@ -31,7 +31,7 @@ jobs:
           curl -fsSL "https://nodejs.org/dist/v${{ env.NODE_VERSION }}/node-v${{ env.NODE_VERSION }}-linux-arm64.tar.gz" -o /tmp/node-arm64.tar.gz
           tar -xzf /tmp/node-arm64.tar.gz -C /tmp
       - name: Build linux arm64
-        run: node scripts/build-exe.cjs linux arm64 "/tmp/node-v${{ env.NODE_VERSION }}-linux-arm64/bin/node"
+        run: node scripts/build-exe.cjs linux arm64 "/tmp/node-v${{ env.NODE_VERSION }}-linux-arm64/bin/node" reuse
       - uses: actions/upload-artifact@v4
         with:
           name: linux
