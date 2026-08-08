@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import path from 'node:path';
+import { config as loadDotenv } from 'dotenv';
 import { isPackaged, loadConfig, socksUrlForPort } from './config.js';
 import { logger } from './logger.js';
 import { MetricsStore } from './metrics.js';
@@ -8,6 +9,10 @@ import { createProxyServer } from './proxy/server.js';
 import { SocksAgentPool } from './proxy/socksAgent.js';
 import { CircuitRotator } from './rotator.js';
 import { TorManager } from './tor/torManager.js';
+
+loadDotenv({
+  path: path.join(isPackaged() ? path.dirname(process.execPath) : process.cwd(), '.env'),
+});
 
 const VERSION = '1.0.0';
 
