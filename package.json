@@ -1,0 +1,32 @@
+{
+  "name": "zen-tor-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Production-ready OpenAI-compatible proxy that routes through Tor with automatic exit-IP rotation every 10 minutes",
+  "type": "module",
+  "main": "dist/index.js",
+  "engines": {
+    "node": ">=18.17.0"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "build:exe": "npm run build && esbuild dist/index.js --bundle --platform=node --format=cjs --target=node20 --outfile=dist/bundle.cjs && node --experimental-sea-config sea-config.json && node scripts/build-exe.cjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test src/config.test.ts"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "socks-proxy-agent": "^8.0.4",
+    "tar": "^7.4.3",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "esbuild": "^0.24.0",
+    "postject": "^1.0.0-alpha.6",
+    "tsx": "^4.16.2",
+    "typescript": "^5.5.4"
+  }
+}

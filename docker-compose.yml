@@ -1,0 +1,19 @@
+services:
+  zen-tor-proxy:
+    build: .
+    container_name: zen-tor-proxy
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      ZEN_API_KEY: ${ZEN_API_KEY:-public}
+      PORT: "5678"
+      HOST: "0.0.0.0"
+      IP_ROTATE_INTERVAL_MS: "600000"
+      TOR_DATA_DIR: /app/data/tor
+      LOG_LEVEL: info
+    volumes:
+      - zen-tor-data:/app/data/tor
+
+volumes:
+  zen-tor-data:
