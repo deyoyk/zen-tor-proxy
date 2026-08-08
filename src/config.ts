@@ -8,7 +8,7 @@ export class ConfigError extends Error {
   }
 }
 
-function isPackaged(): boolean {
+export function isPackaged(): boolean {
   if (typeof process === 'undefined') return false;
   if ((process as { pkg?: unknown }).pkg != null) return true;
   try {
@@ -57,6 +57,7 @@ const EnvSchema = z.object({
     ),
   UPSTREAM_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+  LOG_FILE: z.string().min(1).optional(),
 });
 
 export type AppConfig = z.infer<typeof EnvSchema>;

@@ -1,5 +1,6 @@
 import 'dotenv/config';
-import { loadConfig, socksUrlForPort } from './config.js';
+import path from 'node:path';
+import { isPackaged, loadConfig, socksUrlForPort } from './config.js';
 import { logger } from './logger.js';
 import { MetricsStore } from './metrics.js';
 import { IpChecker } from './net/ipCheck.js';
@@ -13,6 +14,12 @@ const VERSION = '1.0.0';
 async function main(): Promise<void> {
   const cfg = loadConfig(process.env);
   logger.setLevel(cfg.LOG_LEVEL);
+
+  const logFile =
+    cfg.LOG_FILE ??
+    path.join(isPackaged() ? path.dirname(process.execPath) : process.cwd(), 'zen-tor-proxy.log');
+  logger.attachFile(logFile);
+  logger.info(`Log file: ${logFile}`);
 
   if (cfg.HOST !== '127.0.0.1' && !cfg.LOCAL_AUTH_TOKEN) {
     logger.warn(

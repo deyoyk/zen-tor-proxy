@@ -1,3 +1,5 @@
+import { appendFileSync } from 'node:fs';
+
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
 const LEVEL_ORDER: Record<LogLevel, number> = {
@@ -9,9 +11,23 @@ const LEVEL_ORDER: Record<LogLevel, number> = {
 
 export class Logger {
   private level: LogLevel = 'info';
+  private filePath: string | null = null;
 
   setLevel(level: LogLevel): void {
     this.level = level;
+  }
+
+  attachFile(filePath: string): void {
+    try {
+      appendFileSync(filePath, '', { flag: 'a' });
+      this.filePath = filePath;
+    } catch {
+      this.filePath = null;
+    }
+  }
+
+  get file(): string | null {
+    return this.filePath;
   }
 
   debug(message: string, meta?: unknown): void {
@@ -35,6 +51,13 @@ export class Logger {
     const timestamp = new Date().toISOString().slice(11, 23);
     const suffix = meta === undefined ? '' : ` ${typeof meta === 'string' ? meta : JSON.stringify(meta)}`;
     const line = `[${timestamp}] [${level.toUpperCase()}] [zen-tor-proxy] ${message}${suffix}`;
+    if (this.filePath) {
+      try {
+        appendFileSync(this.filePath, `${line}\n`, { flag: 'a' });
+      } catch {
+        /* file logging is best-effort */
+      }
+    }
     if (level === 'error' || level === 'warn') {
       console.error(line);
     } else {

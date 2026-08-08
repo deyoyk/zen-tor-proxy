@@ -1,0 +1,97 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: "24.19.0"
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npx esbuild dist/index.js --bundle --platform=node --format=cjs --target=node20 --outfile=dist/bundle.cjs
+      - name: Build linux x64
+        run: node scripts/build-exe.cjs linux x64
+      - name: Fetch node for linux arm64
+        run: |
+          curl -fsSL "https://nodejs.org/dist/v${{ env.NODE_VERSION }}/node-v${{ env.NODE_VERSION }}-linux-arm64.tar.gz" -o /tmp/node-arm64.tar.gz
+          tar -xzf /tmp/node-arm64.tar.gz -C /tmp
+      - name: Build linux arm64
+        run: node scripts/build-exe.cjs linux arm64 "/tmp/node-v${{ env.NODE_VERSION }}-linux-arm64/bin/node"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/zen-tor-proxy-linux-*
+          if-no-files-found: error
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npx esbuild dist/index.js --bundle --platform=node --format=cjs --target=node20 --outfile=dist/bundle.cjs
+      - name: Build macos arm64
+        run: node scripts/build-exe.cjs macos arm64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/zen-tor-proxy-macos-*
+          if-no-files-found: error
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npx esbuild dist/index.js --bundle --platform=node --format=cjs --target=node20 --outfile=dist/bundle.cjs
+      - name: Build windows x64
+        run: node scripts/build-exe.cjs windows x64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/zen-tor-proxy-windows-*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [build-linux, build-macos, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Assemble release assets
+        run: |
+          mkdir -p dist
+          find artifacts -type f -exec cp {} dist/ \;
+          ls -la dist
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --notes "Automated build of zen-tor-proxy $GITHUB_REF_NAME" --recreate
