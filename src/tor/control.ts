@@ -93,11 +93,24 @@ export async function signalNewNym(options: ControlOptions): Promise<void> {
   await controlCommand(options, 'SIGNAL NEWNYM');
 }
 
-export async function getBootstrapProgress(options: ControlOptions): Promise<number> {
+export interface BootstrapStatus {
+  progress: number;
+  summary: string;
+}
+
+export async function getBootstrapStatus(options: ControlOptions): Promise<BootstrapStatus> {
   const reply = await controlCommand(options, 'GETINFO status/bootstrap-phase');
   for (const line of reply.lines) {
-    const match = line.match(/BOOTSTRAP PROGRESS=(\d+)/);
-    if (match) return parseInt(match[1] ?? '0', 10);
+    const match = line.match(/BOOTSTRAP PROGRESS=(\d+)\s+TAG=\S+\s+SUMMARY="([^"]*)"/);
+    if (match) {
+      return { progress: parseInt(match[1] ?? '0', 10), summary: match[2] ?? '' };
+    }
+    const plain = line.match(/BOOTSTRAP PROGRESS=(\d+)/);
+    if (plain) return { progress: parseInt(plain[1] ?? '0', 10), summary: '' };
   }
-  return 0;
+  return { progress: 0, summary: '' };
+}
+
+export async function getBootstrapProgress(options: ControlOptions): Promise<number> {
+  return (await getBootstrapStatus(options)).progress;
 }

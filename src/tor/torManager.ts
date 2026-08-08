@@ -9,7 +9,7 @@ import type { Logger } from '../logger.js';
 import { sleep } from '../util.js';
 import {
   controlCommand,
-  getBootstrapProgress,
+  getBootstrapStatus,
   signalNewNym as sendNewNym,
   type ControlOptions,
 } from './control.js';
@@ -92,6 +92,7 @@ export class TorManager {
       `DataDirectory "${dataDir.replace(/\\/g, '/')}"`,
       'ExitRelay 0',
       'BridgeRelay 0',
+      ...bridgeLines(this.cfg),
     ].join('\n');
     await writeFile(this.torrcPath, torrc, 'utf8');
 
@@ -99,6 +100,7 @@ export class TorManager {
     const child = spawn(binaryPath, ['-f', this.torrcPath], {
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
+      env: torSpawnEnv(binaryPath),
     });
     this.child = child;
 
@@ -191,7 +193,7 @@ export class TorManager {
   }
 
   private async hashPassword(binaryPath: string, password: string): Promise<string> {
-    const stdout = await execCapture(binaryPath, ['--hash-password', password]);
+    const stdout = await execCapture(binaryPath, ['--hash-password', password], 30_000, torSpawnEnv(binaryPath));
     const match = stdout.match(/^16:[0-9A-Fa-f]+$/m);
     if (!match) {
       throw new Error(
@@ -233,15 +235,26 @@ export class TorManager {
   private async waitForBootstrap(controlPort: number, controlPassword: string): Promise<void> {
     const deadline = Date.now() + this.cfg.TOR_BOOTSTRAP_TIMEOUT_MS;
     let lastProgress = -1;
+    let lastSummary = '';
+    let lastLogAt = 0;
     while (Date.now() < deadline) {
       try {
-        const progress = await getBootstrapProgress({
+        const status = await getBootstrapStatus({
           host: '127.0.0.1',
           port: controlPort,
           password: controlPassword,
         });
-        if (progress >= 100) return;
-        lastProgress = progress;
+        if (status.progress >= 100) return;
+        lastProgress = status.progress;
+        if (status.summary) lastSummary = status.summary;
+        const now = Date.now();
+        if (now - lastLogAt >= 15_000) {
+          lastLogAt = now;
+          this.logger.info(
+            `Tor bootstrap ${lastProgress}% (${lastSummary || 'working'}) — up to ` +
+              `${Math.max(0, Math.round((deadline - now) / 1000))}s remaining`
+          );
+        }
       } catch (err) {
         this.logger.debug(`Bootstrap probe failed: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -249,7 +262,7 @@ export class TorManager {
     }
     throw new Error(
       `Tor bootstrap did not reach 100% within ${Math.round(this.cfg.TOR_BOOTSTRAP_TIMEOUT_MS / 1000)}s ` +
-        `(last progress ${lastProgress}%)`
+        `(last progress ${lastProgress}%${lastSummary ? ` — ${lastSummary}` : ''})`
     );
   }
 
@@ -274,6 +287,31 @@ export class TorManager {
       this.scheduleRestart();
     }
   }
+}
+
+function bridgeLines(cfg: AppConfig): string[] {
+  if (!cfg.TOR_BRIDGES) return [];
+  const bridges = cfg.TOR_BRIDGES.split(',')
+    .map(line => line.trim())
+    .filter(Boolean);
+  if (bridges.length === 0) return [];
+  return ['UseBridges 1', ...bridges.map(line => `Bridge ${line}`)];
+}
+
+function torSpawnEnv(binaryPath: string): NodeJS.ProcessEnv {
+  if (process.platform === 'win32') return process.env;
+  const libDir = path.dirname(binaryPath);
+  const env = { ...process.env };
+  if (process.platform === 'linux') {
+    env.LD_LIBRARY_PATH = env.LD_LIBRARY_PATH
+      ? `${libDir}${path.delimiter}${env.LD_LIBRARY_PATH}`
+      : libDir;
+  } else if (process.platform === 'darwin') {
+    env.DYLD_LIBRARY_PATH = env.DYLD_LIBRARY_PATH
+      ? `${libDir}${path.delimiter}${env.DYLD_LIBRARY_PATH}`
+      : libDir;
+  }
+  return env;
 }
 
 function findOnPath(): string | null {
@@ -321,9 +359,14 @@ async function assertBinary(file: string): Promise<void> {
   }
 }
 
-function execCapture(exe: string, args: string[], timeoutMs = 30_000): Promise<string> {
+function execCapture(
+  exe: string,
+  args: string[],
+  timeoutMs = 30_000,
+  env: NodeJS.ProcessEnv = process.env
+): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(exe, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(exe, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env });
     let stdout = '';
     let stderr = '';
     const timer = setTimeout(() => {

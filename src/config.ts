@@ -42,7 +42,8 @@ const EnvSchema = z.object({
   TOR_SOCKS_PORT: z.coerce.number().int().min(0).max(65535).default(9050),
   TOR_CONTROL_PORT: z.coerce.number().int().min(0).max(65535).default(9051),
   TOR_DATA_DIR: z.string().min(1).default(defaultTorDataDir()),
-  TOR_BOOTSTRAP_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
+  TOR_BRIDGES: z.string().min(1).optional(),
+  TOR_BOOTSTRAP_TIMEOUT_MS: z.coerce.number().int().positive().default(180_000),
   IP_ROTATE_INTERVAL_MS: z.coerce.number().int().positive().default(600_000),
   IP_CHECK_PROVIDERS: z
     .string()
