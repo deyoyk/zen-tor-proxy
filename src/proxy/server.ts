@@ -4,7 +4,8 @@ import type { Logger } from '../logger.js';
 import type { MetricsStore } from '../metrics.js';
 import { readBody, writeJSON } from '../httpUtil.js';
 import type { SocksAgentPool } from './socksAgent.js';
-import { forwardToUpstream, type UpstreamErrorInfo } from './upstream.js';
+import { forwardToUpstream, type UpstreamErrorInfo, type UpstreamRetryInfo } from './upstream.js';
+import { DASHBOARD_HTML, type DashboardPayload } from '../dashboard.js';
 
 export interface HealthPayload {
   status: string;
@@ -37,7 +38,8 @@ export interface ProxyServerDeps {
   metrics: MetricsStore;
   logger: Logger;
   health: () => HealthPayload;
-  onUpstreamError?: (info: UpstreamErrorInfo) => Promise<boolean>;
+  dashboard: () => DashboardPayload;
+  onUpstreamError?: (info: UpstreamErrorInfo) => Promise<UpstreamRetryInfo>;
 }
 
 export function createProxyServer(deps: ProxyServerDeps): http.Server {
@@ -80,6 +82,20 @@ export function createProxyServer(deps: ProxyServerDeps): http.Server {
 
     if (req.method === 'GET' && url === '/stats') {
       writeJSON(res, 200, metrics.snapshot());
+      return;
+    }
+
+    if (req.method === 'GET' && (url === '/' || url === '/dashboard')) {
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Access-Control-Allow-Origin': '*',
+      });
+      res.end(DASHBOARD_HTML);
+      return;
+    }
+
+    if (req.method === 'GET' && url === '/api/dashboard') {
+      writeJSON(res, 200, deps.dashboard());
       return;
     }
 
@@ -141,6 +157,7 @@ export function createProxyServer(deps: ProxyServerDeps): http.Server {
       res,
       bodyJson: JSON.stringify(parsed),
       isStream,
+      model: (parsed?.model as string | undefined) ?? null,
       onUpstreamError: deps.onUpstreamError,
     });
   }

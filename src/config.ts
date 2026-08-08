@@ -63,6 +63,12 @@ const EnvSchema = z.object({
     .enum(['true', 'false'])
     .default('true')
     .transform(value => value === 'true'),
+  // Maximum number of automatic retries after rotating the exit IP.
+  // Raise for effectively infinite retries; 0 disables retrying.
+  ROTATE_MAX_RETRIES: z.coerce.number().int().nonnegative().default(100),
+  // Total wall-clock budget for all retries of one request, in milliseconds.
+  // 0 = no time cap (only ROTATE_MAX_RETRIES bounds the retry loop).
+  ROTATE_RETRY_WINDOW_MS: z.coerce.number().int().nonnegative().default(300_000),
   // Minimum gap between on-demand rotations (avoids hammering NEWNYM when
   // many requests fail at the same time).
   ROTATE_ON_ERROR_COOLDOWN_MS: z.coerce.number().int().nonnegative().default(20_000),

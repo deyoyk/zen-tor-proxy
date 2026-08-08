@@ -105,6 +105,13 @@ export class CircuitRotator {
     return this.rotateFast();
   }
 
+  /** Milliseconds remaining until the next on-demand rotation is allowed. */
+  onDemandCooldownRemaining(): number {
+    const elapsed = Date.now() - this.lastOnDemandAt;
+    const left = this.deps.cfg.ROTATE_ON_ERROR_COOLDOWN_MS - elapsed;
+    return left > 0 ? left : 0;
+  }
+
   private async rotateFast(): Promise<boolean> {
     if (this.rotating) {
       this.deps.logger.debug('On-demand rotation skipped — another rotation is in progress');

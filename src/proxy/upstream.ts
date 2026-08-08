@@ -4,6 +4,7 @@ import type { AppConfig } from '../config.js';
 import type { Logger } from '../logger.js';
 import type { MetricsStore } from '../metrics.js';
 import { writeJSON } from '../httpUtil.js';
+import { sleep } from '../util.js';
 import type { SocksAgentPool } from './socksAgent.js';
 
 const SKIP_RESPONSE_HEADERS =
@@ -15,6 +16,13 @@ export interface UpstreamErrorInfo {
   /** Response body (may be empty for streams and network failures). */
   body: string;
   kind: 'http' | 'network';
+}
+
+export interface UpstreamRetryInfo {
+  /** Whether the Tor exit IP was rotated for this attempt. */
+  rotated: boolean;
+  /** How long to wait before re-sending the request. */
+  delayMs: number;
 }
 
 const QUOTA_ERROR_PATTERN =
@@ -43,10 +51,13 @@ export interface ForwardRequestArgs {
   bodyJson: string;
   isStream: boolean;
   method?: 'GET' | 'POST';
-  /** Invoked when the upstream errors; returns true when the exit IP was rotated. */
-  onUpstreamError?: (info: UpstreamErrorInfo) => Promise<boolean>;
+  model?: string | null;
+  /** Invoked when the upstream errors; resolves when the exit IP was (possibly) rotated. */
+  onUpstreamError?: (info: UpstreamErrorInfo) => Promise<UpstreamRetryInfo>;
   /** Internal — number of times this request has already been re-sent. */
   retryCount?: number;
+  /** Internal — wall-clock deadline (epoch ms) after which retries stop. */
+  retryDeadline?: number;
 }
 
 export function modelsUrlFor(upstream: string): string {
@@ -63,9 +74,11 @@ export function modelsUrlFor(upstream: string): string {
 export function forwardToUpstream(args: ForwardRequestArgs): void {
   const { cfg, pool, metrics, logger, res } = args;
   const retryCount = args.retryCount ?? 0;
+  const retryDeadline = args.retryDeadline ?? Date.now();
   const method = args.method ?? 'POST';
   const url = new URL(method === 'GET' ? modelsUrlFor(cfg.UPSTREAM_URL) : cfg.UPSTREAM_URL);
   const bodyBytes = Buffer.byteLength(args.bodyJson);
+  const startedAt = Date.now();
 
   const headers: Record<string, string> = {
     Accept: args.req.headers['accept'] ?? 'application/json',
@@ -82,11 +95,30 @@ export function forwardToUpstream(args: ForwardRequestArgs): void {
 
   let settled = false;
   let retrying = false;
+  let finalStatus: number | null = null;
+  let finalBytesDown = 0;
+  let finalError: string | undefined;
   const settle = (): void => {
     if (settled) return;
     settled = true;
-    metrics.requestFinished();
+    metrics.requestFinished({
+      status: finalStatus,
+      bytesUp: bodyBytes,
+      bytesDown: finalBytesDown,
+      durationMs: Date.now() - startedAt,
+      model: args.model ?? null,
+      stream: args.isStream,
+      retried: retryCount > 0,
+      errorMsg: finalError,
+    });
     pool.markEnd();
+  };
+
+  const complete = (bytesDown: number): void => {
+    finalBytesDown = bytesDown;
+    metrics.bytesDown += bytesDown;
+    settle();
+    releaseClientListener();
   };
 
   // A retried request reuses the same logical request — count metrics only once.
@@ -105,6 +137,37 @@ export function forwardToUpstream(args: ForwardRequestArgs): void {
     res.removeListener('close', onClientClose);
   };
 
+  /**
+   * Rotate the exit IP and re-send the same request, up to ROTATE_MAX_RETRIES.
+   * Returns true when the request was handed off to a new attempt.
+   */
+  const attemptRetry = async (
+    kind: 'http' | 'network',
+    status: number | null,
+    body: string
+  ): Promise<boolean> => {
+    const windowMs = cfg.ROTATE_RETRY_WINDOW_MS;
+    if (
+      retrying ||
+      !cfg.ROTATE_RETRY_REQUESTS ||
+      retryCount >= cfg.ROTATE_MAX_RETRIES ||
+      (windowMs > 0 && Date.now() - retryDeadline > windowMs) ||
+      !args.onUpstreamError ||
+      !shouldRotateOnError(cfg, { status, body, kind })
+    ) {
+      return false;
+    }
+    retrying = true;
+    const retry = await args.onUpstreamError({ status, body, kind }).catch(() => null);
+    retrying = false;
+    if (!retry || res.destroyed) return false;
+    metrics.retries += 1;
+    releaseClientListener();
+    await sleep(retry.delayMs);
+    forwardToUpstream({ ...args, retryCount: retryCount + 1, retryDeadline });
+    return true;
+  };
+
   proxyReq = https.request(
     {
       hostname: url.hostname,
@@ -116,6 +179,7 @@ export function forwardToUpstream(args: ForwardRequestArgs): void {
     },
     proxyRes => {
       const status = proxyRes.statusCode ?? 502;
+      finalStatus = status;
       const responseHeaders: Record<string, string> = {
         'content-type': proxyRes.headers['content-type'] ?? 'application/json',
         'access-control-allow-origin': '*',
@@ -131,19 +195,37 @@ export function forwardToUpstream(args: ForwardRequestArgs): void {
         metrics.upstreamErrors += 1;
       }
 
+      // Error responses are collected fully so we can retry or give up.
+      if (status >= 400) {
+        let data = '';
+        let bytesDown = 0;
+        proxyRes.on('data', chunk => {
+          data += chunk;
+          bytesDown += chunk.length;
+        });
+        proxyRes.on('error', err => {
+          logger.warn(`Upstream response error: ${err.message}`);
+          complete(bytesDown);
+          if (!res.writableEnded) res.destroy();
+        });
+        proxyRes.on('end', () => {
+          logUpstreamResult(args, status, data);
+          void (async () => {
+            if (await attemptRetry('http', status, data)) return;
+            if (res.destroyed) {
+              complete(bytesDown);
+              return;
+            }
+            writeJSON(res, 500, { error: { message: 'internal error' } });
+            complete(bytesDown);
+          })();
+        });
+        return;
+      }
+
       if (args.isStream) {
         res.writeHead(status, responseHeaders);
-        // Streaming responses can't be retried; just trigger a rotation so the
-        // next request benefits from a fresh exit IP.
-        if (status >= 400 && retryCount === 0 && args.onUpstreamError) {
-          void args.onUpstreamError({ status, body: '', kind: 'http' }).catch(() => {});
-        }
         let bytesDown = 0;
-        const finish = (): void => {
-          metrics.bytesDown += bytesDown;
-          settle();
-          releaseClientListener();
-        };
 
         proxyRes.on('data', chunk => {
           bytesDown += chunk.length;
@@ -155,55 +237,27 @@ export function forwardToUpstream(args: ForwardRequestArgs): void {
         proxyRes.pipe(res);
         proxyRes.on('end', () => {
           logger.debug(`Stream finished · ${status} · ${bytesDown} bytes`);
-          finish();
+          complete(bytesDown);
         });
         return;
       }
 
       let data = '';
       let bytesDown = 0;
-      const finish = (): void => {
-        metrics.bytesDown += bytesDown;
-        settle();
-        releaseClientListener();
-      };
-
       proxyRes.on('data', chunk => {
         data += chunk;
         bytesDown += chunk.length;
       });
       proxyRes.on('error', err => {
         logger.warn(`Upstream response error: ${err.message}`);
-        finish();
+        complete(bytesDown);
         if (!res.writableEnded) res.destroy();
       });
       proxyRes.on('end', () => {
         logUpstreamResult(args, status, data);
-        void (async () => {
-          if (
-            retryCount === 0 &&
-            args.onUpstreamError &&
-            shouldRotateOnError(cfg, { status, body: data, kind: 'http' })
-          ) {
-            retrying = true;
-            const rotated = await args
-              .onUpstreamError({ status, body: data, kind: 'http' })
-              .catch(() => false);
-            retrying = false;
-            if (rotated && cfg.ROTATE_RETRY_REQUESTS) {
-              releaseClientListener();
-              forwardToUpstream({ ...args, retryCount: retryCount + 1 });
-              return;
-            }
-          }
-          if (res.destroyed) {
-            finish();
-            return;
-          }
-          res.writeHead(status, responseHeaders);
-          res.end(data);
-          finish();
-        })();
+        res.writeHead(status, responseHeaders);
+        res.end(data);
+        complete(bytesDown);
       });
     }
   );
@@ -217,31 +271,14 @@ export function forwardToUpstream(args: ForwardRequestArgs): void {
     if (settled || retrying) return;
     metrics.errorsTotal += 1;
     metrics.upstreamErrors += 1;
+    finalStatus = timedOut ? 504 : null;
+    finalError = err.message;
     logger.warn(`Upstream request failed: ${err.message}`);
     void (async () => {
-      if (
-        retryCount === 0 &&
-        !args.isStream &&
-        args.onUpstreamError &&
-        cfg.ROTATE_RETRY_REQUESTS &&
-        shouldRotateOnError(cfg, { status: null, body: '', kind: 'network' })
-      ) {
-        retrying = true;
-        const rotated = await args
-          .onUpstreamError({ status: null, body: '', kind: 'network' })
-          .catch(() => false);
-        retrying = false;
-        if (rotated) {
-          releaseClientListener();
-          forwardToUpstream({ ...args, retryCount: retryCount + 1 });
-          return;
-        }
-      }
+      if (await attemptRetry('network', timedOut ? 504 : null, '')) return;
       settle();
       if (!res.headersSent && !res.destroyed) {
-        writeJSON(res, timedOut ? 504 : 502, {
-          error: { message: timedOut ? 'Upstream timeout' : `Proxy error: ${err.message}` },
-        });
+        writeJSON(res, 500, { error: { message: 'internal error' } });
       } else if (!res.writableEnded) {
         res.destroy();
       }

@@ -1,15 +1,16 @@
 import 'dotenv/config';
 import path from 'node:path';
 import { config as loadDotenv } from 'dotenv';
-import { isPackaged, loadConfig, socksUrlForPort } from './config.js';
+import { isPackaged, loadConfig, socksUrlForPort, type AppConfig } from './config.js';
 import { logger } from './logger.js';
 import { MetricsStore } from './metrics.js';
 import { IpChecker } from './net/ipCheck.js';
-import { createProxyServer } from './proxy/server.js';
-import type { UpstreamErrorInfo } from './proxy/upstream.js';
+import { createProxyServer, type HealthPayload } from './proxy/server.js';
+import type { UpstreamErrorInfo, UpstreamRetryInfo } from './proxy/upstream.js';
 import { SocksAgentPool } from './proxy/socksAgent.js';
 import { CircuitRotator } from './rotator.js';
 import { TorManager } from './tor/torManager.js';
+import type { DashboardPayload } from './dashboard.js';
 
 loadDotenv({
   path: path.join(isPackaged() ? path.dirname(process.execPath) : process.cwd(), '.env'),
@@ -60,11 +61,37 @@ async function main(): Promise<void> {
 
   rotator.start();
 
-  const onUpstreamError = async (info: UpstreamErrorInfo): Promise<boolean> => {
-    if (!cfg.ROTATE_ON_UPSTREAM_ERROR) return false;
+  const onUpstreamError = async (info: UpstreamErrorInfo): Promise<UpstreamRetryInfo> => {
+    if (!cfg.ROTATE_ON_UPSTREAM_ERROR) {
+      return { rotated: false, delayMs: cfg.ROTATE_ON_ERROR_COOLDOWN_MS };
+    }
     const rotated = await rotator.rotateOnDemand();
-    logger.debug(`Upstream error (${info.kind}${info.status !== null ? ` ${info.status}` : ''}) → on-demand rotation: ${rotated ? 'ok' : 'skipped'}`);
-    return rotated;
+    const delayMs = rotated ? 2_000 : Math.max(500, rotator.onDemandCooldownRemaining());
+    logger.debug(
+      `Upstream error (${info.kind}${info.status !== null ? ` ${info.status}` : ''}) → on-demand rotation: ${rotated ? 'ok' : 'skipped'} · retry in ${delayMs}ms`
+    );
+    return { rotated, delayMs };
+  };
+
+  const getHealth = () => {
+    const torStatus = tor.getStatus();
+    return {
+      status: torStatus.running && metrics.lastExitIp !== null ? 'ok' : 'degraded',
+      uptimeSec: metrics.uptimeSec,
+      upstream: cfg.UPSTREAM_URL,
+      tor: torStatus,
+      exitIp: metrics.lastExitIp,
+      lastIpCheckedAt: metrics.lastIpCheckedAt,
+      nextRotationAt: rotator.nextRotationAt,
+      rotateIntervalMs: cfg.IP_ROTATE_INTERVAL_MS,
+      requests: metrics.requestsTotal,
+      active: metrics.activeRequests,
+      errors: metrics.errorsTotal,
+      rotations: metrics.rotations,
+      rotationFailures: metrics.rotationFailures,
+      bytesUp: metrics.bytesUp,
+      bytesDown: metrics.bytesDown,
+    };
   };
 
   const server = createProxyServer({
@@ -73,27 +100,12 @@ async function main(): Promise<void> {
     metrics,
     logger,
     onUpstreamError,
-    health: () => {
-      const torStatus = tor.getStatus();
-      return {
-        status: torStatus.running && metrics.lastExitIp !== null ? 'ok' : 'degraded',
-        uptimeSec: metrics.uptimeSec,
-        upstream: cfg.UPSTREAM_URL,
-        tor: torStatus,
-        exitIp: metrics.lastExitIp,
-        lastIpCheckedAt: metrics.lastIpCheckedAt,
-        nextRotationAt: rotator.nextRotationAt,
-        rotateIntervalMs: cfg.IP_ROTATE_INTERVAL_MS,
-        requests: metrics.requestsTotal,
-        active: metrics.activeRequests,
-        errors: metrics.errorsTotal,
-        rotations: metrics.rotations,
-        rotationFailures: metrics.rotationFailures,
-        bytesUp: metrics.bytesUp,
-        bytesDown: metrics.bytesDown,
-      };
-    },
+    health: getHealth,
+    dashboard: () => buildDashboardPayload(cfg, metrics, getHealth, rotator),
   });
+
+  const sampler = setInterval(() => metrics.sample(), 1_000);
+  sampler.unref?.();
 
   server.on('error', (err: NodeJS.ErrnoException) => {
     if (err.code === 'EADDRINUSE') {
@@ -114,6 +126,7 @@ async function main(): Promise<void> {
     shuttingDown = true;
     logger.info(`Received ${signal} — shutting down`);
     rotator.stop();
+    clearInterval(sampler);
     const forceExit = setTimeout(() => process.exit(1), 8_000);
     forceExit.unref?.();
     server.close(() => {
@@ -144,3 +157,36 @@ main().catch(err => {
   logger.error(`Fatal startup error: ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
   process.exit(1);
 });
+
+function buildDashboardPayload(
+  cfg: AppConfig,
+  metrics: MetricsStore,
+  getHealth: () => HealthPayload,
+  rotator: CircuitRotator
+): DashboardPayload {
+  return {
+    health: getHealth(),
+    stats: metrics.snapshot(),
+    history: metrics.history.map(point => ({ ...point })),
+    statusCounts: { ...metrics.statusCounts },
+    models: { ...metrics.models },
+    recent: metrics.recent.map(entry => ({ ...entry })),
+    config: dashboardConfig(cfg),
+    version: VERSION,
+    runtime: { node: process.version, platform: process.platform, arch: process.arch, pid: process.pid },
+  };
+}
+
+function dashboardConfig(cfg: AppConfig): Record<string, unknown> {
+  const out: Record<string, unknown> = {
+    LOCAL_AUTH_TOKEN: cfg.LOCAL_AUTH_TOKEN ? '••• configured (hidden)' : '(unset)',
+  };
+  for (const [key, value] of Object.entries(cfg)) {
+    if (key === 'ZEN_API_KEY' || key === 'LOCAL_AUTH_TOKEN') {
+      out[key] = value ? '••• configured (hidden)' : '(unset)';
+      continue;
+    }
+    out[key] = Array.isArray(value) ? value.join(',') : value;
+  }
+  return out;
+}

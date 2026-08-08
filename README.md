@@ -66,6 +66,10 @@ By default the proxy does **not** rotate on a timer. Instead it rotates on deman
 | `ROTATE_ON_UPSTREAM_ERROR` | `true` | Master switch for on-demand rotation when the model errors. |
 | `ROTATE_ON_ANY_UPSTREAM_ERROR` | `true` | Rotate on any 4xx/5xx response. Set to `false` to rotate only on quota-style errors (402/429 or messages about usage limits). |
 | `ROTATE_RETRY_REQUESTS` | `true` | Automatically re-send the failed request once over the new exit IP. |
+| `ROTATE_MAX_RETRIES` | `100` | Maximum automatic retries after rotating the exit IP. Raise for effectively infinite retries; `0` disables retrying. |
+| `ROTATE_RETRY_WINDOW_MS` | `300000` | Total wall-clock budget (ms) for all retries of one request. `0` = no time cap. |
+
+On any failure that exhausts retries (or that the proxy can't recover from), the client always receives a generic `{"error":{"message":"internal error"}}` — upstream error details and status codes are never forwarded. This includes streaming requests, which are now retried on error before any data is streamed.
 | `ROTATE_ON_ERROR_COOLDOWN_MS` | `20000` | Minimum gap between on-demand rotations (prevents hammering NEWNYM when many requests fail at once). |
 
 ## Configuration & service management
