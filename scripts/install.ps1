@@ -12,7 +12,7 @@ $ShimPath = Join-Path $ShimDir 'zen-tor-proxy.cmd'
 $VersionFile = Join-Path $InstallDir 'version.txt'
 
 if ($Uninstall) {
-  taskkill /F /T /IM $AssetName 2>$null | Out-Null
+  cmd.exe /c "taskkill /F /T /IM `"$AssetName`" >nul 2>&1" | Out-Null
   Start-Sleep -Milliseconds 500
   if (Test-Path $InstallDir) { Remove-Item $InstallDir -Recurse -Force }
   if (Test-Path $ShimPath) { Remove-Item $ShimPath -Force }
@@ -33,7 +33,9 @@ if (Test-Path $ExePath) {
     exit 0
   }
   Write-Host "Updating zen-tor-proxy $Installed -> $Tag ..."
-  taskkill /F /T /IM $AssetName 2>$null | Out-Null
+  # Kill via cmd so a "process not found" (app not currently running) never
+  # surfaces as a PowerShell error and aborts the update.
+  cmd.exe /c "taskkill /F /T /IM `"$AssetName`" >nul 2>&1" | Out-Null
   Start-Sleep -Milliseconds 500
   $Tmp = Join-Path $InstallDir "$AssetName.tmp"
   Invoke-WebRequest -Uri $Asset.browser_download_url -OutFile $Tmp
