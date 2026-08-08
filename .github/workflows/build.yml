@@ -77,7 +77,9 @@ jobs:
           if-no-files-found: error
 
   release:
-    if: startsWith(github.ref, 'refs/tags/')
+    # Releases on tagged pushes (manual v* releases) and on every push to main
+    # (auto-bumped patch release so installers always get the latest build).
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
     needs: [build-linux, build-macos, build-windows]
     runs-on: ubuntu-latest
     permissions:
@@ -92,7 +94,37 @@ jobs:
           mkdir -p dist
           find artifacts -type f -exec cp {} dist/ \;
           ls -la dist
+      - name: Determine release tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            # Auto-bump the patch version from the latest existing release.
+            LATEST="$(gh release list --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null || true)"
+            if [[ "$LATEST" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+              MAJOR="${BASH_REMATCH[1]}"
+              MINOR="${BASH_REMATCH[2]}"
+              PATCH="${BASH_REMATCH[3]}"
+            else
+              MAJOR=1
+              MINOR=0
+              PATCH=0
+            fi
+            while true; do
+              PATCH=$((PATCH + 1))
+              TAG="v${MAJOR}.${MINOR}.${PATCH}"
+              gh release view "$TAG" >/dev/null 2>&1 || break
+            done
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          fi
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --notes "Automated build of zen-tor-proxy $GITHUB_REF_NAME"
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          echo "Releasing $TAG"
+          gh release create "$TAG" dist/* --title "$TAG" \
+            --notes "Automated build of zen-tor-proxy $TAG" --target "$GITHUB_SHA"

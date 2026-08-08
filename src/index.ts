@@ -15,7 +15,7 @@ loadDotenv({
   path: path.join(isPackaged() ? path.dirname(process.execPath) : process.cwd(), '.env'),
 });
 
-const VERSION = '1.0.0';
+const VERSION = '1.0.1';
 
 async function main(): Promise<void> {
   const cfg = loadConfig(process.env);
