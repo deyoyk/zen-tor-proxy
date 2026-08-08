@@ -72,6 +72,9 @@ const EnvSchema = z.object({
   // Minimum gap between on-demand rotations (avoids hammering NEWNYM when
   // many requests fail at the same time).
   ROTATE_ON_ERROR_COOLDOWN_MS: z.coerce.number().int().nonnegative().default(20_000),
+  // Base delay for exponential backoff on 429 rate-limit errors (ms).
+  // Each retry doubles this delay, capped at 120s. 0 disables backoff.
+  RATE_LIMIT_BACKOFF_BASE_MS: z.coerce.number().int().nonnegative().default(5_000),
   IP_CHECK_PROVIDERS: z
     .string()
     .default(

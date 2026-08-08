@@ -163,7 +163,15 @@ export function forwardToUpstream(args: ForwardRequestArgs): void {
     if (!retry || res.destroyed) return false;
     metrics.retries += 1;
     releaseClientListener();
-    await sleep(retry.delayMs);
+    // Exponential backoff for 429 errors: base, 2*base, 4*base, ... capped at 120s
+    const is429 = status === 429;
+    const backoffMs = is429 && cfg.RATE_LIMIT_BACKOFF_BASE_MS > 0
+      ? Math.min(120_000, cfg.RATE_LIMIT_BACKOFF_BASE_MS * Math.pow(2, retryCount))
+      : retry.delayMs;
+    if (is429) {
+      logger.warn(`429 rate limit · retry ${retryCount + 1} in ${Math.round(backoffMs / 1000)}s`);
+    }
+    await sleep(backoffMs);
     forwardToUpstream({ ...args, retryCount: retryCount + 1, retryDeadline });
     return true;
   };
