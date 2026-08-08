@@ -29,17 +29,17 @@ if (-not $Asset) { throw "Asset $AssetName not found in release $Tag" }
 if (Test-Path $ExePath) {
   $Installed = if (Test-Path $VersionFile) { (Get-Content $VersionFile -Raw).Trim() } else { 'unknown' }
   if ($Installed -eq $Tag) {
-    Write-Host "zen-tor-proxy is already up to date (v$Tag)."
+    Write-Host "zen-tor-proxy is already up to date ($Tag)."
     exit 0
   }
-  Write-Host "Updating zen-tor-proxy $Installed -> v$Tag ..."
+  Write-Host "Updating zen-tor-proxy $Installed -> $Tag ..."
   taskkill /F /T /IM $AssetName 2>$null | Out-Null
   Start-Sleep -Milliseconds 500
   $Tmp = Join-Path $InstallDir "$AssetName.tmp"
   Invoke-WebRequest -Uri $Asset.browser_download_url -OutFile $Tmp
   Move-Item -Force -Path $Tmp -Destination $ExePath
 } else {
-  Write-Host "Installing zen-tor-proxy v$Tag ..."
+  Write-Host "Installing zen-tor-proxy $Tag ..."
   New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
   Invoke-WebRequest -Uri $Asset.browser_download_url -OutFile $ExePath
   New-Item -ItemType Directory -Force -Path $ShimDir | Out-Null
@@ -65,7 +65,7 @@ if (-not (Test-Path $EnvFile)) {
 }
 
 Write-Host ''
-Write-Host 'zen-tor-proxy installed (v' + $Tag + ')!'
+Write-Host "zen-tor-proxy installed ($Tag)!"
 Write-Host '  Run it in any terminal:  zen-tor-proxy'
 Write-Host '  API endpoint:            http://127.0.0.1:5678/v1'
 Write-Host '  Edit config:             ' + $EnvFile

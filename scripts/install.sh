@@ -150,7 +150,7 @@ EOF
 }
 
 if [ "$INSTALLED" = "$TAG" ] && [ -x "$BIN" ]; then
-  echo "zen-tor-proxy is already up to date (v$TAG)."
+  echo "zen-tor-proxy is already up to date ($TAG)."
   ensure_unit
   echo "Service status:"
   if command -v systemctl >/dev/null 2>&1; then
@@ -162,10 +162,10 @@ fi
 $MKDIR "$DEST_DIR" "$DATA_DIR"
 
 if [ -x "$BIN" ]; then
-  echo "Updating zen-tor-proxy ${INSTALLED:-unknown} -> v$TAG ..."
+  echo "Updating zen-tor-proxy ${INSTALLED:-unknown} -> $TAG ..."
   stop_service
 else
-  echo "Installing zen-tor-proxy v$TAG ..."
+  echo "Installing zen-tor-proxy $TAG ..."
 fi
 
 echo "Downloading $ASSET ..."
@@ -194,6 +194,6 @@ ensure_unit
 echo "Service started (systemd/launchd)."
 
 echo ""
-echo "zen-tor-proxy installed (v$TAG)!"
+echo "zen-tor-proxy installed ($TAG)!"
 echo "  API endpoint:  http://127.0.0.1:5678/v1"
 echo "  Config file:   $DEST_DIR/.env"
