@@ -1,5 +1,5 @@
 import https from 'node:https';
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { ClientRequest, IncomingMessage, ServerResponse } from 'node:http';
 import type { AppConfig } from '../config.js';
 import type { Logger } from '../logger.js';
 import type { MetricsStore } from '../metrics.js';
@@ -8,6 +8,30 @@ import type { SocksAgentPool } from './socksAgent.js';
 
 const SKIP_RESPONSE_HEADERS =
   /^(host|connection|transfer-encoding|keep-alive|upgrade|content-length|content-type|access-control-allow-origin|access-control-allow-headers|access-control-allow-methods|access-control-max-age)$/i;
+
+export interface UpstreamErrorInfo {
+  /** HTTP status of the error response, or null for connection-level failures. */
+  status: number | null;
+  /** Response body (may be empty for streams and network failures). */
+  body: string;
+  kind: 'http' | 'network';
+}
+
+const QUOTA_ERROR_PATTERN =
+  /free usage|usage limit|usage exceeded|quota|rate ?limit|too many requests|limit reached|exceeded|billing|credits|insufficient|subscription/i;
+
+export function isQuotaError(status: number | null, body: string): boolean {
+  if (status === 402 || status === 429) return true;
+  return body.length > 0 && QUOTA_ERROR_PATTERN.test(body);
+}
+
+export function shouldRotateOnError(cfg: AppConfig, info: UpstreamErrorInfo): boolean {
+  if (!cfg.ROTATE_ON_UPSTREAM_ERROR) return false;
+  if (info.kind === 'network') return true;
+  if (info.status === null) return false;
+  if (isQuotaError(info.status, info.body)) return true;
+  return cfg.ROTATE_ON_ANY_UPSTREAM_ERROR && info.status >= 400;
+}
 
 export interface ForwardRequestArgs {
   cfg: AppConfig;
@@ -19,6 +43,10 @@ export interface ForwardRequestArgs {
   bodyJson: string;
   isStream: boolean;
   method?: 'GET' | 'POST';
+  /** Invoked when the upstream errors; returns true when the exit IP was rotated. */
+  onUpstreamError?: (info: UpstreamErrorInfo) => Promise<boolean>;
+  /** Internal — number of times this request has already been re-sent. */
+  retryCount?: number;
 }
 
 export function modelsUrlFor(upstream: string): string {
@@ -34,6 +62,7 @@ export function modelsUrlFor(upstream: string): string {
 
 export function forwardToUpstream(args: ForwardRequestArgs): void {
   const { cfg, pool, metrics, logger, res } = args;
+  const retryCount = args.retryCount ?? 0;
   const method = args.method ?? 'POST';
   const url = new URL(method === 'GET' ? modelsUrlFor(cfg.UPSTREAM_URL) : cfg.UPSTREAM_URL);
   const bodyBytes = Buffer.byteLength(args.bodyJson);
@@ -52,6 +81,7 @@ export function forwardToUpstream(args: ForwardRequestArgs): void {
   if (auth) headers.Authorization = auth;
 
   let settled = false;
+  let retrying = false;
   const settle = (): void => {
     if (settled) return;
     settled = true;
@@ -59,10 +89,23 @@ export function forwardToUpstream(args: ForwardRequestArgs): void {
     pool.markEnd();
   };
 
-  metrics.requestStarted(args.isStream);
-  pool.markStart();
+  // A retried request reuses the same logical request — count metrics only once.
+  if (retryCount === 0) {
+    metrics.requestStarted(args.isStream);
+    pool.markStart();
+    metrics.bytesUp += bodyBytes;
+  }
 
-  const proxyReq = https.request(
+  let proxyReq: ClientRequest | null = null;
+  const onClientClose = (): void => {
+    if (!settled && !retrying && proxyReq) proxyReq.destroy();
+  };
+  res.on('close', onClientClose);
+  const releaseClientListener = (): void => {
+    res.removeListener('close', onClientClose);
+  };
+
+  proxyReq = https.request(
     {
       hostname: url.hostname,
       port: url.port || '443',
@@ -87,21 +130,21 @@ export function forwardToUpstream(args: ForwardRequestArgs): void {
         metrics.errorsTotal += 1;
         metrics.upstreamErrors += 1;
       }
-      res.writeHead(status, responseHeaders);
-
-      let bytesDown = 0;
-      const onClientClose = (): void => {
-        if (!settled) proxyReq.destroy();
-      };
-      res.on('close', onClientClose);
-
-      const finish = (): void => {
-        metrics.bytesDown += bytesDown;
-        settle();
-        res.removeListener('close', onClientClose);
-      };
 
       if (args.isStream) {
+        res.writeHead(status, responseHeaders);
+        // Streaming responses can't be retried; just trigger a rotation so the
+        // next request benefits from a fresh exit IP.
+        if (status >= 400 && retryCount === 0 && args.onUpstreamError) {
+          void args.onUpstreamError({ status, body: '', kind: 'http' }).catch(() => {});
+        }
+        let bytesDown = 0;
+        const finish = (): void => {
+          metrics.bytesDown += bytesDown;
+          settle();
+          releaseClientListener();
+        };
+
         proxyRes.on('data', chunk => {
           bytesDown += chunk.length;
         });
@@ -114,42 +157,97 @@ export function forwardToUpstream(args: ForwardRequestArgs): void {
           logger.debug(`Stream finished · ${status} · ${bytesDown} bytes`);
           finish();
         });
-      } else {
-        let data = '';
-        proxyRes.on('data', chunk => {
-          data += chunk;
-          bytesDown += chunk.length;
-        });
-        proxyRes.on('end', () => {
-          logUpstreamResult(args, status, data);
+        return;
+      }
+
+      let data = '';
+      let bytesDown = 0;
+      const finish = (): void => {
+        metrics.bytesDown += bytesDown;
+        settle();
+        releaseClientListener();
+      };
+
+      proxyRes.on('data', chunk => {
+        data += chunk;
+        bytesDown += chunk.length;
+      });
+      proxyRes.on('error', err => {
+        logger.warn(`Upstream response error: ${err.message}`);
+        finish();
+        if (!res.writableEnded) res.destroy();
+      });
+      proxyRes.on('end', () => {
+        logUpstreamResult(args, status, data);
+        void (async () => {
+          if (
+            retryCount === 0 &&
+            args.onUpstreamError &&
+            shouldRotateOnError(cfg, { status, body: data, kind: 'http' })
+          ) {
+            retrying = true;
+            const rotated = await args
+              .onUpstreamError({ status, body: data, kind: 'http' })
+              .catch(() => false);
+            retrying = false;
+            if (rotated && cfg.ROTATE_RETRY_REQUESTS) {
+              releaseClientListener();
+              forwardToUpstream({ ...args, retryCount: retryCount + 1 });
+              return;
+            }
+          }
+          if (res.destroyed) {
+            finish();
+            return;
+          }
+          res.writeHead(status, responseHeaders);
           res.end(data);
           finish();
-        });
-      }
+        })();
+      });
     }
   );
 
   let timedOut = false;
   proxyReq.setTimeout(cfg.UPSTREAM_TIMEOUT_MS, () => {
     timedOut = true;
-    proxyReq.destroy(new Error(`Upstream timeout after ${cfg.UPSTREAM_TIMEOUT_MS}ms`));
+    proxyReq?.destroy(new Error(`Upstream timeout after ${cfg.UPSTREAM_TIMEOUT_MS}ms`));
   });
   proxyReq.on('error', err => {
-    if (settled) return;
+    if (settled || retrying) return;
     metrics.errorsTotal += 1;
     metrics.upstreamErrors += 1;
-    settle();
     logger.warn(`Upstream request failed: ${err.message}`);
-    if (!res.headersSent) {
-      writeJSON(res, timedOut ? 504 : 502, {
-        error: { message: timedOut ? 'Upstream timeout' : `Proxy error: ${err.message}` },
-      });
-    } else if (!res.writableEnded) {
-      res.destroy();
-    }
+    void (async () => {
+      if (
+        retryCount === 0 &&
+        !args.isStream &&
+        args.onUpstreamError &&
+        cfg.ROTATE_RETRY_REQUESTS &&
+        shouldRotateOnError(cfg, { status: null, body: '', kind: 'network' })
+      ) {
+        retrying = true;
+        const rotated = await args
+          .onUpstreamError({ status: null, body: '', kind: 'network' })
+          .catch(() => false);
+        retrying = false;
+        if (rotated) {
+          releaseClientListener();
+          forwardToUpstream({ ...args, retryCount: retryCount + 1 });
+          return;
+        }
+      }
+      settle();
+      if (!res.headersSent && !res.destroyed) {
+        writeJSON(res, timedOut ? 504 : 502, {
+          error: { message: timedOut ? 'Upstream timeout' : `Proxy error: ${err.message}` },
+        });
+      } else if (!res.writableEnded) {
+        res.destroy();
+      }
+    })();
   });
 
-  metrics.bytesUp += bodyBytes;
   if (method === 'POST') proxyReq.write(args.bodyJson);
   proxyReq.end();
 }

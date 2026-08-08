@@ -4,7 +4,7 @@ import type { Logger } from '../logger.js';
 import type { MetricsStore } from '../metrics.js';
 import { readBody, writeJSON } from '../httpUtil.js';
 import type { SocksAgentPool } from './socksAgent.js';
-import { forwardToUpstream } from './upstream.js';
+import { forwardToUpstream, type UpstreamErrorInfo } from './upstream.js';
 
 export interface HealthPayload {
   status: string;
@@ -37,6 +37,7 @@ export interface ProxyServerDeps {
   metrics: MetricsStore;
   logger: Logger;
   health: () => HealthPayload;
+  onUpstreamError?: (info: UpstreamErrorInfo) => Promise<boolean>;
 }
 
 export function createProxyServer(deps: ProxyServerDeps): http.Server {
@@ -108,6 +109,7 @@ export function createProxyServer(deps: ProxyServerDeps): http.Server {
         bodyJson: '',
         isStream: false,
         method: 'GET',
+        onUpstreamError: deps.onUpstreamError,
       });
       return;
     }
@@ -139,6 +141,7 @@ export function createProxyServer(deps: ProxyServerDeps): http.Server {
       res,
       bodyJson: JSON.stringify(parsed),
       isStream,
+      onUpstreamError: deps.onUpstreamError,
     });
   }
 

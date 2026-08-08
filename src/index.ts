@@ -6,6 +6,7 @@ import { logger } from './logger.js';
 import { MetricsStore } from './metrics.js';
 import { IpChecker } from './net/ipCheck.js';
 import { createProxyServer } from './proxy/server.js';
+import type { UpstreamErrorInfo } from './proxy/upstream.js';
 import { SocksAgentPool } from './proxy/socksAgent.js';
 import { CircuitRotator } from './rotator.js';
 import { TorManager } from './tor/torManager.js';
@@ -59,11 +60,19 @@ async function main(): Promise<void> {
 
   rotator.start();
 
+  const onUpstreamError = async (info: UpstreamErrorInfo): Promise<boolean> => {
+    if (!cfg.ROTATE_ON_UPSTREAM_ERROR) return false;
+    const rotated = await rotator.rotateOnDemand();
+    logger.debug(`Upstream error (${info.kind}${info.status !== null ? ` ${info.status}` : ''}) → on-demand rotation: ${rotated ? 'ok' : 'skipped'}`);
+    return rotated;
+  };
+
   const server = createProxyServer({
     cfg,
     pool,
     metrics,
     logger,
+    onUpstreamError,
     health: () => {
       const torStatus = tor.getStatus();
       return {

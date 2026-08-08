@@ -1,6 +1,8 @@
 # Zen Tor Proxy
 
-Routes any OpenAI-compatible client through Tor - new exit IP every 10 minutes, zero config.
+Routes any OpenAI-compatible client through Tor with automatic exit-IP rotation, zero config.
+
+When the upstream model responds with an error (for example **"Free usage exceeded"**, 402/429 rate limits, or any other 4xx/5xx), the proxy automatically **changes the Tor exit IP** and **re-sends the request once** over the new IP — no subscription needed.
 
 ## Install
 
@@ -53,6 +55,18 @@ Test it:
 ```bash
 curl http://127.0.0.1:5678/health
 ```
+
+## Exit-IP rotation
+
+By default the proxy does **not** rotate on a timer. Instead it rotates on demand whenever the upstream model returns an error (the typical case: the free tier says *"Free usage exceeded"*, the exit IP is changed, and the request is retried automatically so the free quota applies again).
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `IP_ROTATE_INTERVAL_MS` | `0` | Scheduled rotation interval. `0` disables the timer; e.g. `600000` restores rotation every 10 minutes. |
+| `ROTATE_ON_UPSTREAM_ERROR` | `true` | Master switch for on-demand rotation when the model errors. |
+| `ROTATE_ON_ANY_UPSTREAM_ERROR` | `true` | Rotate on any 4xx/5xx response. Set to `false` to rotate only on quota-style errors (402/429 or messages about usage limits). |
+| `ROTATE_RETRY_REQUESTS` | `true` | Automatically re-send the failed request once over the new exit IP. |
+| `ROTATE_ON_ERROR_COOLDOWN_MS` | `20000` | Minimum gap between on-demand rotations (prevents hammering NEWNYM when many requests fail at once). |
 
 ## Configuration & service management
 

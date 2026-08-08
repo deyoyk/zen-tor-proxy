@@ -44,7 +44,28 @@ const EnvSchema = z.object({
   TOR_DATA_DIR: z.string().min(1).default(defaultTorDataDir()),
   TOR_BRIDGES: z.string().min(1).optional(),
   TOR_BOOTSTRAP_TIMEOUT_MS: z.coerce.number().int().positive().default(180_000),
-  IP_ROTATE_INTERVAL_MS: z.coerce.number().int().positive().default(600_000),
+  // Scheduled exit-IP rotation interval. 0 disables the timer; the proxy then
+  // rotates on demand whenever the upstream model returns an error.
+  IP_ROTATE_INTERVAL_MS: z.coerce.number().int().nonnegative().default(0),
+  // Master switch for on-demand rotation triggered by upstream model errors.
+  ROTATE_ON_UPSTREAM_ERROR: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform(value => value === 'true'),
+  // When true, rotate on ANY 4xx/5xx response. When false, rotate only on
+  // quota-style errors (402/429 or bodies mentioning usage limits).
+  ROTATE_ON_ANY_UPSTREAM_ERROR: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform(value => value === 'true'),
+  // Automatically resend the failed request once over the new exit IP.
+  ROTATE_RETRY_REQUESTS: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform(value => value === 'true'),
+  // Minimum gap between on-demand rotations (avoids hammering NEWNYM when
+  // many requests fail at the same time).
+  ROTATE_ON_ERROR_COOLDOWN_MS: z.coerce.number().int().nonnegative().default(20_000),
   IP_CHECK_PROVIDERS: z
     .string()
     .default(
